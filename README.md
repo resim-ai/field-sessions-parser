@@ -27,9 +27,9 @@ for record in recording.iter_messages():
 
 `open`, `iter_messages` and `inspect` preserve integer epoch nanoseconds and relative recording provenance. Inspection traverses the complete recording; it does not infer analysis logic. Unsupported decoding, corrupt input and incomplete reads fail visibly.
 
-## Metadata discovery (0.2.2 development)
+## Metadata discovery (reader 0.2.2 and newer)
 
-Use `field-sessions-parser summary recording.mcap` or `field_sessions_parser.summarize(source)` with version 0.2.2. It reads the header and footer summary, returning channels, schema definitions, channel metadata and recorded counts/time bounds when statistics exist. Text schema data uses `data_encoding: utf8`; binary data uses `base64`. Missing statistics/counts are null, not zero. Nanoseconds remain integers; consumers must not round them through floating point. The released 0.2.1 wheel above does not have this command.
+Use `field-sessions-parser summary recording.mcap` or `field_sessions_parser.summarize(source)` with version 0.2.2 or newer. It reads the header and footer summary, returning channels, schema definitions, channel metadata and recorded counts/time bounds when statistics exist. Text schema data uses `data_encoding: utf8`; binary data uses `base64`. Missing statistics/counts are null, not zero. Nanoseconds remain integers; consumers must not round them through floating point. Signal Flag plugin 0.0.6 bundles reader 0.2.2 with this command. The standalone GitHub release remains 0.2.1 and does not have it.
 
 Summary discovery does not iterate, decompress or decode messages, discover observed field values, validate payload integrity, or establish signal meaning. Summary parsing retains the existing size cap, rejects data-section records and bounds metadata fields to their declared records; the header is also capped. Range caches can fetch neighboring payload bytes; this is not a strict total-transfer budget. A missing/unreadable summary fails without a scan or full-download fallback. Recovery is a separate operation requiring an explicit decision.
 
@@ -78,6 +78,8 @@ The package workflow tests Linux and macOS with Python 3.12, runs the Linux SDK 
 
 Version 0.2.1 moves the package from ReSim's backend repository without changing reader behavior. Version 0.2.0 removed non-MCAP adapters. Existing published wheels and images remain immutable.
 
-## Remote HTTP reads
+## Remote range reads
 
-HTTPS sources must honor byte ranges with matching `206` Content-Range and body length. Truncated responses are discarded and retried through the same transport within the configured attempt limit. A `200` response that ignores Range is rejected before its body is read; the reader does not substitute a full-object download. Known size and ETag changes fail. Without a strong initial ETag, response validation does not establish immutable object identity. Persistent truncation and unsupported ranges remain explicit failures.
+HTTPS sources must honor byte ranges with matching `206` Content-Range and body length. Truncated responses are discarded and retried through the same transport within the configured attempt limit. A `200` response that ignores Range is rejected before its body is read; the reader does not substitute a full-object download. Known size and ETag changes fail for both HTTPS and S3 sources before fetched blocks enter the cache. Without a strong initial ETag, response validation does not establish immutable object identity. Persistent truncation and unsupported ranges remain explicit failures.
+
+The prepared 0.2.3 reader applies the existing object-identity checks to S3 as well as HTTPS, rejecting recordings replaced during range reads. Published bundles remain immutable; this source change does not replace an installed plugin bundle until its next release.

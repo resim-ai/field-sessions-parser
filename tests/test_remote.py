@@ -358,6 +358,23 @@ def test_s3_reads_through_get_object():
     assert client.calls[1] == ("bucket", "prefix/drive.mcap", f"bytes={64 * KIB}-{128 * KIB - 1}")
 
 
+@pytest.mark.parametrize("change", ["etag", "size", "missing_etag"])
+def test_s3_rejects_object_replaced_between_range_reads(change):
+    client = StubS3Client({("bucket", "k"): b"A" * 32}, etag='"original"')
+    stream = S3RangeFile("bucket", "k", client=client, block_size=8, head_probe_bytes=8)
+    assert stream.read(8) == b"A" * 8
+    client.objects[("bucket", "k")] = b"B" * (40 if change == "size" else 32)
+    if change == "etag":
+        client.etag = '"replacement"'
+    elif change == "missing_etag":
+        client.etag = None
+    with pytest.raises(SourceError, match="changed during range reads"):
+        stream.read(8)
+    assert stream.tell() == 8
+    assert stream.cached_blocks == 0
+    assert len(client.calls) == 2
+
+
 @pytest.mark.parametrize("code", ["AccessDenied", "NoSuchKey", "NoSuchBucket", "InvalidObjectState"])
 def test_s3_fatal_codes_raise_at_once(code):
     client = StubS3Client({("bucket", "k"): DATA})

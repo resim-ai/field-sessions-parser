@@ -235,6 +235,12 @@ class RangeFile(io.IOBase):
                     self._sleep(delay)
                     delay *= 2
                 continue
+            if self._size is not None and fetched.total_size != self._size:
+                raise SourceError(f"{self.describe()}: object size changed during range reads")
+            if self._etag is not None and fetched.etag != self._etag:
+                raise SourceError(f"{self.describe()}: object ETag changed during range reads")
+            if self._etag is None:
+                self._etag = fetched.etag
             self.bytes_fetched += len(fetched.data)
             return fetched
         raise SourceError(f"{self.describe()}: giving up after {self._max_attempts} attempts: {last_error}")
@@ -291,18 +297,12 @@ class HttpRangeFile(RangeFile):
         etag = clean_etag(headers.get("etag"))
         if status == 206:
             total, expected = http_range_size(headers, start, stop)
-            if self._size is not None and total != self._size:
-                raise SourceError(f"{self.describe()}: object size changed during range reads")
-            if self._etag is not None and etag != self._etag:
-                raise SourceError(f"{self.describe()}: object ETag changed during range reads")
             if len(body) < expected:
                 raise TransientError(
                     f"HTTP response body was incomplete: expected {expected}, got {len(body)}"
                 )
             if len(body) > expected:
                 raise SourceError(f"{self.describe()}: HTTP response body exceeds the requested range")
-            if self._etag is None:
-                self._etag = etag
             return Fetched(body, total, etag)
         if status == 200:
             raise SourceError(f"{self.describe()}: HTTP server ignored Range; full-object reads are disabled")
@@ -311,8 +311,6 @@ class HttpRangeFile(RangeFile):
             if match is None or start < int(match[1]):
                 raise SourceError(f"{self.describe()}: invalid HTTP 416 Content-Range")
             total = int(match[1])
-            if self._size is not None and total != self._size:
-                raise SourceError(f"{self.describe()}: object size changed during range reads")
             return Fetched(b"", total, etag)
         if status in RETRY_STATUSES:
             raise TransientError(f"HTTP {status}", status)

@@ -12,4 +12,4 @@ Use `python -m pytest -m 'not sdk' -q`, `ruff check .` and `ruff format --check 
 
 `CLAUDE.md` points here. Update this map when adding, moving or deleting files. Write documentation paragraphs on one source line. Keep source comments about durable constraints rather than investigation history.
 
-Obtain Pete’s explicit confirmation before making this repository public or making any public code push, tag, or release. Preparing or moving a package does not authorize publication. This repository remains private until that confirmation.
+Obtain Pete’s explicit confirmation before any public code push, tag, or release. Preparing or moving a package does not authorize publication.
