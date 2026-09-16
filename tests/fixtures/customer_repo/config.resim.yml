@@ -1,0 +1,88 @@
+version: 1
+topics:
+  session_inventory:
+    schema:
+      start_ns: string
+      end_ns: string
+      files: string[]
+      sizes_bytes: string[]
+      formats: string[]
+  session_events:
+    event: true
+    schema:
+      name: string
+      status: status
+      description: string
+      tags: string[]
+      recording_key: string
+  recording_topics:
+    schema:
+      recording_key: string
+      topic_name: string
+      message_count: int
+  burro_state:
+    schema:
+      recording_key: string
+      state: int
+      obstacle_stop: boolean
+      stop_observation: boolean
+  burro_gps:
+    schema:
+      recording_key: string
+      fix_status: string
+      has_previous: boolean
+      fix_changed: boolean
+metrics:
+  Session duration:
+    query_string: SELECT (CAST(end_ns AS BIGINT) - CAST(start_ns AS BIGINT)) / CAST(1000000000 AS DOUBLE) FROM session_inventory
+    units: s
+    type: test
+    template_type: system
+    template: scalar
+  Recorded messages:
+    query_string: SELECT SUM(message_count) FROM recording_topics
+    units: messages
+    type: test
+    template_type: system
+    template: scalar
+  Recordings:
+    query_string: SELECT COUNT(DISTINCT recording_key) FROM recording_topics
+    units: recordings
+    type: test
+    template_type: system
+    template: scalar
+  Obstacle stop observations:
+    query_string: SELECT SUM(CASE WHEN stop_observation THEN 1 ELSE 0 END) FROM burro_state HAVING COUNT(*) > 0
+    skip_if_no_data: true
+    units: observations
+    type: test
+    template_type: system
+    template: scalar
+  GPS fix changes:
+    query_string: SELECT SUM(CASE WHEN fix_changed THEN 1 ELSE 0 END) FROM burro_gps HAVING SUM(CASE WHEN has_previous
+      THEN 1 ELSE 0 END) > 0
+    skip_if_no_data: true
+    units: changes
+    type: test
+    template_type: system
+    template: scalar
+  Recorded topics:
+    query_string: SELECT COUNT(DISTINCT topic_name) FROM recording_topics
+    units: topics
+    type: test
+    template_type: system
+    template: scalar
+metrics sets:
+  Burro observations:
+    metrics:
+    - Recorded topics
+    - Session duration
+    - Recorded messages
+    - Recordings
+    - Obstacle stop observations
+    - GPS fix changes
+  Session metrics:
+    metrics:
+    - Session duration
+    - Recorded messages
+    - Recordings

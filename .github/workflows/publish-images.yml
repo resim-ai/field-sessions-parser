@@ -1,0 +1,225 @@
+---
+name: Publish Field Sessions Images
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Immutable public parser source revision
+        type: string
+        required: true
+      fixture:
+        description: Build the skill-written synthetic customer image
+        type: boolean
+        default: false
+      fixture_base_digest:
+        description: Previously published base digest pinned by the fixture Dockerfile
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  IMAGE: public.ecr.aws/resim/open-builds/field-sessions
+
+jobs:
+  build-and-push:
+    name: Test and publish the session metrics base
+    if: github.repository == 'resim-ai/rerun' && github.event_name == 'workflow_dispatch'
+    runs-on: gha-medium
+    steps:
+      - name: Validate source revision
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]'
+
+      - name: Checkout public parser source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: resim-ai/field-sessions-parser
+          ref: ${{ inputs.source_sha }}
+          path: parser-source
+          persist-credentials: false
+
+      - name: Verify source revision and determine tag
+        id: tag
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          actual_sha=$(git -C parser-source rev-parse HEAD)
+          test "$actual_sha" = "$SOURCE_SHA"
+          echo "short_sha=${SOURCE_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS Credentials us-east-1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        with:
+          role-to-assume: arn:aws:iam::909785973729:role/actions-rerun
+          aws-region: us-east-1
+
+      - name: Login to ECR public
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: public.ecr.aws
+
+      - name: Reset AWS Environment Variables
+        run: |
+          {
+            echo "AWS_ACCESS_KEY_ID="
+            echo "AWS_SECRET_ACCESS_KEY="
+            echo "AWS_SESSION_TOKEN="
+          } >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Test readers and Emitter on the supported runtime
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: parser-source
+          target: test
+          platforms: linux/amd64
+          build-args: FIELD_SESSIONS_PARSER_VERSION=${{ steps.tag.outputs.short_sha }}
+
+      - name: Build and push the parser image
+        id: base
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: parser-source
+          target: parser
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: true
+          build-args: FIELD_SESSIONS_PARSER_VERSION=${{ steps.tag.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/resim-ai/field-sessions-parser
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.short_sha }}
+
+      - name: Build and push the no-op image
+        id: noop
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: parser-source
+          target: noop
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/resim-ai/field-sessions-parser
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.short_sha }}-noop
+
+      - name: Validate the fixture pins its published base
+        if: inputs.fixture
+        env:
+          BASE_DIGEST: ${{ inputs.fixture_base_digest }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          dockerfile = Path('parser-source/tests/fixtures/customer_repo/Dockerfile')
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ['BASE_DIGEST']), 'A published base digest is required'
+          expected = f"FROM {os.environ['IMAGE']}@{os.environ['BASE_DIGEST']}"
+          lines = [line.strip() for line in dockerfile.read_text().splitlines()]
+          assert re.fullmatch(re.escape(expected) + r'(?: AS [A-Za-z0-9_.-]+)?', lines[0]), f"Fixture must pin {expected}"
+          PY
+          docker buildx imagetools inspect "$IMAGE@$BASE_DIGEST" > /dev/null
+
+      - name: Build and push the synthetic customer image
+        if: inputs.fixture
+        id: fixture
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: parser-source/tests/fixtures/customer_repo
+          target: runtime
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/resim-ai/field-sessions-parser
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.short_sha }}-fixture
+
+      - name: Exercise the published customer image entrypoint
+        if: inputs.fixture
+        env:
+          FIXTURE_DIGEST: ${{ steps.fixture.outputs.digest }}
+        run: |
+          fixture_volume=$(docker volume create)
+          trap 'docker volume rm "$fixture_volume" > /dev/null' EXIT
+          docker run --rm -i --platform linux/amd64 --entrypoint python \
+            --mount "type=volume,source=$fixture_volume,target=/fixture" "$IMAGE@$FIXTURE_DIGEST" - <<'PY'
+          import json
+          from pathlib import Path
+          from mcap.writer import Writer
+          folder = Path('/fixture/input')
+          folder.mkdir()
+          with (folder / 'drive.mcap').open('wb') as stream:
+              writer = Writer(stream)
+              writer.start()
+              schema = writer.register_schema('sample', 'jsonschema', b'{"type":"object"}')
+              channel = writer.register_channel('/sample', 'json', schema)
+              for offset in range(2):
+                  stamp = 1789420800000000001 + offset
+                  writer.add_message(channel, stamp, json.dumps({'value': offset}).encode(), stamp)
+              writer.finish()
+          PY
+          docker run --rm --platform linux/amd64 \
+            --mount "type=volume,source=$fixture_volume,target=/fixture" "$IMAGE@$FIXTURE_DIGEST" \
+            --input /fixture/input --output /fixture/output/emissions.resim.jsonl
+          docker run --rm -i --platform linux/amd64 --entrypoint python \
+            --mount "type=volume,source=$fixture_volume,target=/fixture,readonly" "$IMAGE@$FIXTURE_DIGEST" - <<'PY'
+          import json
+          from pathlib import Path
+          from field_sessions_parser.emissions import event_metadata
+          rows = [json.loads(line) for line in Path('/fixture/output/emissions.resim.jsonl').read_text().splitlines()]
+          assert len(rows) == 3
+          assert all(row['$metadata']['timestamp'] == 1789420800000000001 for row in rows)
+          event = next(row for row in rows if row['$metadata'].get('event'))
+          assert event_metadata(event['$data']['tags']) == {
+              'recording_key': 'drive.mcap', 'timestamp_ns': '1789420800000000001'}
+          assert any(row['$data'].get('message_count') == 2 for row in rows)
+          inventory = next(row['$data'] for row in rows if row['$metadata']['topic'] == 'session_inventory')
+          assert inventory['start_ns'] == '1789420800000000001'
+          assert inventory['end_ns'] == '1789420800000000002'
+          assert inventory['files'] == ['drive.mcap']
+          assert inventory['formats'] == ['mcap']
+          assert len(inventory['sizes_bytes']) == 1 and int(inventory['sizes_bytes'][0]) > 0
+          print('Published customer image entrypoint, exact timestamps and Emitter output verified')
+          PY
+
+      - name: Verify published SBOMs
+        env:
+          BASE_DIGEST: ${{ steps.base.outputs.digest }}
+          NOOP_DIGEST: ${{ steps.noop.outputs.digest }}
+          FIXTURE_DIGEST: ${{ steps.fixture.outputs.digest }}
+        run: |
+          for digest in "$BASE_DIGEST" "$NOOP_DIGEST" "$FIXTURE_DIGEST"; do
+            test -n "$digest" || continue
+            docker buildx imagetools inspect "$IMAGE@$digest" --format '{{ json .SBOM }}' > sbom.json
+            jq -e '.. | objects | select(.SPDXID? == "SPDXRef-DOCUMENT")' sbom.json > /dev/null
+          done
+
+      - name: Print the pushed tags
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SHORT_SHA: ${{ steps.tag.outputs.short_sha }}
+          BASE_DIGEST: ${{ steps.base.outputs.digest }}
+          NOOP_DIGEST: ${{ steps.noop.outputs.digest }}
+          FIXTURE_DIGEST: ${{ steps.fixture.outputs.digest }}
+        run: |
+          {
+            echo "Parser source: https://github.com/resim-ai/field-sessions-parser/tree/$SOURCE_SHA"
+            echo "Dispatcher: $GITHUB_REPOSITORY at \`$GITHUB_SHA\`"
+            echo
+            echo "- \`$IMAGE:$SHORT_SHA\` — \`$BASE_DIGEST\`"
+            echo "- \`$IMAGE:$SHORT_SHA-noop\` — \`$NOOP_DIGEST\`"
+            if test -n "$FIXTURE_DIGEST"; then
+              echo "- \`$IMAGE:$SHORT_SHA-fixture\` — \`$FIXTURE_DIGEST\`"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"

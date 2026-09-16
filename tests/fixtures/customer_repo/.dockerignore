@@ -1,0 +1,8 @@
+**
+!.dockerignore
+!Dockerfile
+!job.py
+!config.resim.yml
+!tests/make_fixture.py
+!tests/check_emissions.py
+!tests/run_checks.py

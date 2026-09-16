@@ -1,0 +1,112 @@
+name: Test and release package
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native reader (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install native reader and development tools
+        run: |
+          python -m pip install --require-hashes -r requirements-readers.lock
+          python -m pip install '.[dev]'
+          python -m pip check
+      - name: Verify package version and native SDK isolation
+        run: |
+          python - <<'PY'
+          import importlib.metadata
+          import tomllib
+          from pathlib import Path
+          import field_sessions_parser
+          project = tomllib.loads(Path('pyproject.toml').read_text())['project']
+          assert field_sessions_parser.__version__ == project['version']
+          assert importlib.metadata.version('field-sessions-parser') == project['version']
+          assert 'resim-open-core' not in {d.metadata['Name'] for d in importlib.metadata.distributions()}
+          PY
+      - name: Test native readers and packaging
+        run: python -m pytest -m 'not sdk' -q
+      - name: Lint and format
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+
+  sdk:
+    name: Linux SDK and customer entrypoint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Run full test suite in the pinned Linux runtime
+        run: docker build --target test --build-arg FIELD_SESSIONS_PARSER_VERSION="$GITHUB_SHA" .
+
+  bundle:
+    name: Build committed package
+    needs: [native, sdk]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install build frontend
+        run: python -m pip install uv==0.9.26
+      - name: Build wheel and native bundle from the exact commit
+        run: python scripts/vendor_reader.py --revision "$GITHUB_SHA" --output dist
+      - name: Verify release tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
+          assert os.environ['RELEASE_TAG'] == f'v{version}', 'Tag must match package version'
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reader-package
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish immutable GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: bundle
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: reader-package
+          path: dist
+      - name: Create release without overwriting prior artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --title "$RELEASE_TAG" --generate-notes

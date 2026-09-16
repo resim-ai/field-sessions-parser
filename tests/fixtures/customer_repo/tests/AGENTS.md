@@ -1,0 +1,3 @@
+# Delivered synthetic SDK checks
+
+These maintained scripts run inside the fixture Dockerfile's Linux `test` stage. `make_fixture.py` creates synthetic MCAPs, `check_emissions.py` checks actual Emitter rows and failed-input cleanup, and `run_checks.py` exports a receipt only after all commands/assertions pass. They need no enclosing ReSim source checkout. Preserve the explicit Burro profile and known expected values; extend the tests when domain behavior changes. Native parser checks cannot substitute for running the real Linux SDK stage. Historical coordination snapshots and exported receipts are immutable evidence, not these files' current test results.

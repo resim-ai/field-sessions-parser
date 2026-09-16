@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "field-sessions-parser"
+version = "0.2.1"
+description = "Readers and Emitter helpers for customer session metrics builds"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "mcap==1.4.0",
+  "rosbags==0.11.5",
+  "protobuf==7.36.1",
+  "numpy==2.5.3",
+  "boto3==1.43.93",
+  "zstandard==0.25.0",
+  "lz4==4.4.5",
+]
+
+[project.optional-dependencies]
+sdk = ["resim-open-core==1.5.0"]
+build = ["setuptools==80.9.0", "wheel==0.45.1"]
+dev = [
+  "pip-tools==7.6.1",
+  "pytest==9.1.1",
+  "ruff==0.16.7",
+  "PyYAML==6.0.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/resim-ai/field-sessions-parser"
+Repository = "https://github.com/resim-ai/field-sessions-parser"
+Issues = "https://github.com/resim-ai/field-sessions-parser/issues"
+
+[project.scripts]
+field-sessions-parser = "field_sessions_parser.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = [".scratch"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["sdk: requires the pinned open-core SDK on Python 3.12"]
