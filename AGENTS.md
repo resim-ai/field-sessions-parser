@@ -11,3 +11,5 @@ Use `python -m pytest -m 'not sdk' -q`, `ruff check .` and `ruff format --check 
 `scripts/vendor_reader.py` builds from an explicit committed revision at this repository root. It emits a wheel, native `requirements.lock` and manifest carrying the public source URL, full revision and hashes. `.github/workflows/package.yml` tests native platforms and the SDK, then creates immutable GitHub package releases from matching version tags. `.github/workflows/publish-images.yml` is reusable image publication called from the backend with a pinned source SHA and caller AWS identity; no new cloud permissions or automatic customer-image pushes belong in package setup.
 
 `CLAUDE.md` points here. Update this map when adding, moving or deleting files. Write documentation paragraphs on one source line. Keep source comments about durable constraints rather than investigation history.
+
+Obtain Pete’s explicit confirmation before making this repository public or making any public code push, tag, or release. Preparing or moving a package does not authorize publication. This repository remains private until that confirmation.

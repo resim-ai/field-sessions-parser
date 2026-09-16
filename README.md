@@ -10,10 +10,12 @@ Download the wheel and `requirements.lock` from a [release](https://github.com/r
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements.lock
 .venv/bin/python -m pip install --no-deps field_sessions_parser-0.2.1-py3-none-any.whl
-.venv/bin/field-sessions-parser inspect recording.mcap
+.venv/bin/field-sessions-parser --help
 ```
 
 The [Signal Flag plugin](https://github.com/resim-ai/signal-flag-plugin) provides an isolated setup command and bundled reader for Claude users; no source checkout is needed to use that bundle. This repository does not currently publish to PyPI.
+
+For intentional full-recording payload analysis (not metadata discovery):
 
 ```python
 from field_sessions_parser import open
@@ -24,6 +26,14 @@ for record in recording.iter_messages():
 ```
 
 `open`, `iter_messages` and `inspect` preserve integer epoch nanoseconds and relative recording provenance. Inspection traverses the complete recording; it does not infer analysis logic. Unsupported decoding, corrupt input and incomplete reads fail visibly.
+
+## Metadata discovery (0.2.2 development)
+
+Use `field-sessions-parser summary recording.mcap` or `field_sessions_parser.summarize(source)` with version 0.2.2. It reads the header and footer summary, returning channels, schema definitions, channel metadata and recorded counts/time bounds when statistics exist. Text schema data uses `data_encoding: utf8`; binary data uses `base64`. Missing statistics/counts are null, not zero. Nanoseconds remain integers; consumers must not round them through floating point. The released 0.2.1 wheel above does not have this command.
+
+Summary discovery does not iterate, decompress or decode messages, discover observed field values, validate payload integrity, or establish signal meaning. Summary parsing retains the existing size cap. Range caches can fetch neighboring payload bytes; this is not a strict total-transfer budget. A missing/unreadable summary fails without a scan or full-download fallback. Recovery is a separate operation requiring an explicit decision.
+
+`field-sessions-parser inspect recording.mcap` remains a full recording decode scan. `iter_messages(topics=...)` may also traverse the complete recording; neither is a bounded sample operation. Do not use them by default for discovery. No bounded sampling API is provided.
 
 ## Customer metrics builds
 

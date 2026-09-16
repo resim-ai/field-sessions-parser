@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, is_dataclass
@@ -71,7 +72,61 @@ class Recording:
             if reader.decode_failures:
                 raise LogError(f"incomplete recording {self.key}: {reader.decode_failures}")
 
+    def summarize(self) -> dict[str, Any]:
+        """Read recorded header/summary metadata without iterating or decoding messages."""
+        with open_source(self.source, s3_client=self.s3_client) as stream:
+            reader = LogReader(stream).open()
+            statistics = reader.statistics
+            schemas = []
+            for schema in reader.schemas.values():
+                try:
+                    data = schema.data.decode("utf-8")
+                    data_encoding = "utf8"
+                except UnicodeDecodeError:
+                    data = base64.b64encode(schema.data).decode("ascii")
+                    data_encoding = "base64"
+                schemas.append(
+                    {
+                        "id": schema.id,
+                        "name": schema.name,
+                        "encoding": schema.encoding,
+                        "data": data,
+                        "data_encoding": data_encoding,
+                    }
+                )
+            return {
+                "recording_key": self.key,
+                "format": self.format,
+                "summary_only": True,
+                "header": {"profile": reader.header.profile, "library": reader.header.library},
+                "indexed": reader.indexed,
+                "channels": [
+                    {
+                        "id": channel.id,
+                        "topic": channel.topic,
+                        "message_encoding": channel.message_encoding,
+                        "schema_id": channel.schema_id,
+                        "metadata": channel.metadata,
+                        "message_count": (
+                            statistics.channel_message_counts.get(channel.id) if statistics else None
+                        ),
+                    }
+                    for channel in reader.channels.values()
+                ],
+                "schemas": schemas,
+                "statistics": (
+                    {
+                        "message_count": statistics.message_count,
+                        "start_ns": statistics.message_start_time if statistics.message_count else None,
+                        "end_ns": statistics.message_end_time if statistics.message_count else None,
+                    }
+                    if statistics
+                    else None
+                ),
+            }
+
     def inspect(self) -> dict[str, Any]:
+        """Scan and decode every message, collecting observed fields and exact bounds."""
         counts: Counter[str] = Counter()
         missing = 0
         start = end = None
@@ -126,3 +181,7 @@ def iter_messages(source: str | Path, **options) -> Iterator[Record]:
 
 def inspect(source: str | Path, **options) -> dict[str, Any]:
     return open(source, **options).inspect()
+
+
+def summarize(source: str | Path, **options) -> dict[str, Any]:
+    return open(source, **options).summarize()

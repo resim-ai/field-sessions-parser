@@ -90,3 +90,83 @@ def test_cli_unsupported_format_fails_without_read(tmp_path, monkeypatch, capsys
     failure = json.loads(output.err)
     assert failure["complete"] is False
     assert "unsupported recording format" in failure["error"]
+
+
+def test_summary_reads_metadata_without_message_traversal(ros1_mcap, monkeypatch):
+    import io
+
+    from field_sessions_parser import logs, summarize
+
+    with LocalRangeFile(ros1_mcap) as stream:
+        reader = LogReader(stream).open()
+        chunks = [(c.chunk_start_offset, c.chunk_start_offset + c.chunk_length) for c in reader.chunk_indexes]
+
+    class MetadataOnlyStream(io.BytesIO):
+        def read(self, size=-1):
+            assert size >= 0, "summary requested an unbounded read"
+            start = self.tell()
+            assert not any(start < end and start + size > begin for begin, end in chunks), (
+                "summary traversed a message chunk"
+            )
+            return super().read(size)
+
+    def forbid_messages(*args, **kwargs):
+        pytest.fail("metadata discovery must not iterate or decode messages")
+
+    monkeypatch.setattr(logs, "open_source", lambda *a, **kw: MetadataOnlyStream(ros1_mcap.read_bytes()))
+    monkeypatch.setattr(LogReader, "iter_messages", forbid_messages)
+    monkeypatch.setattr(LogReader, "decode", forbid_messages)
+    report = summarize(ros1_mcap, recording_key="nested/drive.mcap")
+    assert report["summary_only"] is True
+    assert report["recording_key"] == "nested/drive.mcap"
+    assert report["header"] == {"profile": "ros1", "library": "field-sessions-fixture"}
+    assert report["statistics"]["message_count"] == 138
+    assert {c["topic"]: c["message_count"] for c in report["channels"]}["/vehicle/odom"] == 60
+    schema = next(s for s in report["schemas"] if s["name"] == "demo_msgs/Status")
+    assert schema["data_encoding"] == "utf8"
+    assert "int32 mode" in schema["data"]
+    assert "fields" not in report and "complete" not in report
+
+
+@pytest.mark.parametrize("statistics", [False, True])
+def test_summary_reports_recorded_statistics_without_decoding(tmp_path, statistics):
+    import base64
+
+    from field_sessions_parser import summarize
+
+    path = tmp_path / "unknown.mcap"
+    start = 1789420800000000001
+    with path.open("wb") as output:
+        writer = Writer(output, use_statistics=statistics)
+        writer.start()
+        schema = writer.register_schema("opaque", "unknown", b"\xff\x00")
+        channel = writer.register_channel("/state", "unknown", schema, metadata={"source": "synthetic"})
+        for timestamp in [start, start + 1]:
+            writer.add_message(channel, timestamp, b"undecodable", timestamp)
+        writer.finish()
+    report = summarize(path)
+    assert report["schemas"][0]["data_encoding"] == "base64"
+    assert base64.b64decode(report["schemas"][0]["data"]) == b"\xff\x00"
+    assert report["channels"][0]["metadata"] == {"source": "synthetic"}
+    assert report["channels"][0]["message_count"] == (2 if statistics else None)
+    assert report["statistics"] == (
+        {"message_count": 2, "start_ns": start, "end_ns": start + 1} if statistics else None
+    )
+    with pytest.raises(Exception, match="cannot decode"):
+        inspect(path)
+
+
+def test_summary_cli_and_missing_summary_do_not_scan(ros1_mcap, no_summary_mcap, monkeypatch, capsys):
+    from field_sessions_parser.logs import Recording
+
+    monkeypatch.setattr(Recording, "iter_messages", lambda *a, **kw: pytest.fail("full scan fallback"))
+    monkeypatch.setattr(sys, "argv", ["field-sessions-parser", "summary", str(ros1_mcap)])
+    assert main() == 0
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert json.loads(output.out)["summary_only"] is True
+    monkeypatch.setattr(sys, "argv", ["field-sessions-parser", "summary", str(no_summary_mcap)])
+    assert main() == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "no summary section" in json.loads(output.err)["error"]
