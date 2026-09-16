@@ -361,15 +361,15 @@ def test_chunk_record_disagreeing_with_its_index_is_rejected_before_its_body_is_
         assert any("declares" in reason and "its index" in reason for reason in reasons)
 
 
-def test_summary_start_inside_the_data_section_never_decompresses_a_chunk(ros1_mcap, tmp_path, monkeypatch):
+def test_summary_start_inside_the_data_section_is_rejected(ros1_mcap, tmp_path, monkeypatch):
     patched = tmp_path / "early-summary.mcap"
     patched.write_bytes(with_summary_start(ros1_mcap.read_bytes(), 8))
     monkeypatch.setattr(
         "mcap.stream_reader.breakup_chunk",
         lambda *args, **kwargs: pytest.fail("a chunk was decompressed while reading the summary"),
     )
-    reader, _ = open_reader(patched)
-    assert len(reader.channels) == 4 and len(reader.chunk_indexes) > 2
+    with pytest.raises(NoSummaryError, match="outside the metadata region|unexpected record opcode"):
+        open_reader(patched)
 
 
 def test_summary_over_the_cap_is_rejected(ros1_mcap, tmp_path):
@@ -378,7 +378,7 @@ def test_summary_over_the_cap_is_rejected(ros1_mcap, tmp_path):
     reader, _ = open_reader(ros1_mcap, max_summary_bytes=cap)
     assert len(reader.channels) == 4
     patched = tmp_path / "early-summary.mcap"
-    patched.write_bytes(with_summary_start(data, 8))
+    patched.write_bytes(with_summary_start(data, 9))
     with pytest.raises(NoSummaryError, match="over the"):
         open_reader(patched, max_summary_bytes=cap)
 

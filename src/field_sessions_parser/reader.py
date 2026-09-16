@@ -44,6 +44,7 @@ from mcap.records import (
     MetadataIndex,
     Schema,
     Statistics,
+    SummaryOffset,
 )
 from mcap.stream_reader import MAGIC_SIZE, StreamReader, breakup_chunk
 from mcap.summary import Summary
@@ -106,6 +107,21 @@ class NoSummaryError(LogError):
     pass
 
 
+class _RecordBody:
+    def __init__(self, stream, length: int):
+        self.stream = stream
+        self.remaining = length
+
+    def read(self, length: int) -> bytes:
+        if length < 0 or length > self.remaining:
+            raise LogError("metadata field exceeds its record boundary")
+        data = self.stream.read(length)
+        if len(data) != length:
+            raise LogError("truncated metadata record")
+        self.remaining -= length
+        return data
+
+
 class LogReader:
     def __init__(
         self,
@@ -138,16 +154,20 @@ class LogReader:
         stream.seek(size - MAGIC_SIZE)
         if stream.read(MAGIC_SIZE) != MCAP_MAGIC:
             raise NotMcapError("not an MCAP file: the trailing magic is missing")
-        stream.seek(size - MAGIC_SIZE - FOOTER_SIZE)
+        footer_start = size - MAGIC_SIZE - FOOTER_SIZE
+        stream.seek(footer_start)
         data = ReadDataStream(stream)
         if data.read1() != Opcode.FOOTER:
             raise NotMcapError("not an MCAP file: no footer record before the trailing magic")
-        data.read8()
+        if data.read8() != FOOTER_SIZE - RECORD_PREFIX:
+            raise NotMcapError("not an MCAP file: invalid footer record length")
         footer = Footer.read(data)
         if footer.summary_start == 0:
             raise NoSummaryError(
                 "the MCAP has no summary section; run `mcap recover` on the file and upload the result"
             )
+        if not MAGIC_SIZE < footer.summary_start < footer_start:
+            raise NoSummaryError("the MCAP summary offset is outside the metadata region")
         summary_bytes = size - footer.summary_start
         if summary_bytes > self._max_summary_bytes:
             raise NoSummaryError(
@@ -156,11 +176,7 @@ class LogReader:
             )
         stream.seek(footer.summary_start)
         try:
-            self.summary = _read_summary(
-                StreamReader(
-                    stream, skip_magic=True, emit_chunks=True, record_size_limit=self._max_summary_bytes
-                )
-            )
+            self.summary = _read_summary(stream, footer_start)
         except SourceError:
             raise
         except Exception as err:
@@ -174,9 +190,12 @@ class LogReader:
         if stream.read(MAGIC_SIZE) != MCAP_MAGIC:
             raise NotMcapError("not an MCAP file: the leading magic is missing")
         data = ReadDataStream(stream)
-        if data.read1() == Opcode.HEADER:
-            data.read8()
-            self.header = Header.read(data)
+        if data.read1() != Opcode.HEADER:
+            raise NotMcapError("not an MCAP file: the header record is missing")
+        header_length = data.read8()
+        if header_length > min(self._max_summary_bytes, footer.summary_start - stream.tell()):
+            raise NotMcapError("the MCAP header exceeds its metadata boundary or size cap")
+        self.header = Header.read(ReadDataStream(_RecordBody(stream, header_length)))
 
         ordered = sorted(
             self.summary.chunk_indexes, key=lambda ci: (ci.message_start_time, ci.chunk_start_offset)
@@ -598,9 +617,30 @@ def _chunk_messages(chunk: Chunk) -> list[Message]:
     return [record for record in records if isinstance(record, Message)]
 
 
-def _read_summary(stream_reader: StreamReader) -> Summary:
+def _read_summary(stream, end: int) -> Summary:
     summary = Summary()
-    for record in stream_reader.records:
+    record_types = {
+        Opcode.STATISTICS: Statistics,
+        Opcode.SCHEMA: Schema,
+        Opcode.CHANNEL: Channel,
+        Opcode.ATTACHMENT_INDEX: AttachmentIndex,
+        Opcode.CHUNK_INDEX: ChunkIndex,
+        Opcode.METADATA_INDEX: MetadataIndex,
+        Opcode.SUMMARY_OFFSET: SummaryOffset,
+    }
+    while stream.tell() < end:
+        if end - stream.tell() < RECORD_PREFIX:
+            raise NoSummaryError("truncated summary record prefix")
+        data = ReadDataStream(stream)
+        opcode, length = data.read1(), data.read8()
+        record_type = record_types.get(opcode)
+        if record_type is None:
+            raise NoSummaryError(f"unexpected record opcode {opcode} in the summary")
+        if length > end - stream.tell():
+            raise NoSummaryError("summary record exceeds the summary boundary")
+        body = _RecordBody(stream, length)
+        record = record_type.read(ReadDataStream(body))
+        stream.seek(body.remaining, 1)
         if isinstance(record, Statistics):
             summary.statistics = record
         elif isinstance(record, Schema):
@@ -613,6 +653,4 @@ def _read_summary(stream_reader: StreamReader) -> Summary:
             summary.chunk_indexes.append(record)
         elif isinstance(record, MetadataIndex):
             summary.metadata_indexes.append(record)
-        elif isinstance(record, Footer):
-            break
     return summary

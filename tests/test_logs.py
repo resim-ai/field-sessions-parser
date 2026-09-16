@@ -170,3 +170,63 @@ def test_summary_cli_and_missing_summary_do_not_scan(ros1_mcap, no_summary_mcap,
     output = capsys.readouterr()
     assert output.out == ""
     assert "no summary section" in json.loads(output.err)["error"]
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["header_length", "header_field", "summary_length", "summary_field", "summary_offset", "chunk_offset"],
+)
+def test_summary_rejects_malicious_metadata_before_large_http_reads(ros1_mcap, monkeypatch, corruption):
+    from mcap.reader import FOOTER_SIZE
+    from range_server import FakeOpener
+
+    from field_sessions_parser import logs, summarize
+    from field_sessions_parser.remote import HttpRangeFile
+
+    data = bytearray(ros1_mcap.read_bytes())
+    footer_start = len(data) - 8 - FOOTER_SIZE
+    summary_start = struct.unpack_from("<Q", data, footer_start + 9)[0]
+    with LocalRangeFile(ros1_mcap) as stream:
+        chunk_start = LogReader(stream).open().chunk_indexes[0].chunk_start_offset
+    if corruption == "header_length":
+        struct.pack_into("<Q", data, 9, 2**40)
+    elif corruption == "header_field":
+        struct.pack_into("<I", data, 17, 2**32 - 1)
+    elif corruption == "summary_length":
+        struct.pack_into("<Q", data, summary_start + 1, 2**40)
+    elif corruption == "summary_field":
+        assert data[summary_start] == 3  # Schema: id followed by a length-prefixed name.
+        struct.pack_into("<I", data, summary_start + 11, 2**32 - 1)
+    elif corruption == "summary_offset":
+        struct.pack_into("<Q", data, footer_start + 9, 2**63)
+    else:
+        struct.pack_into("<Q", data, footer_start + 9, chunk_start)
+    opener = FakeOpener(bytes(data))
+    remote = HttpRangeFile(
+        "https://example.invalid/drive.mcap", opener=opener, block_size=64, head_probe_bytes=64
+    )
+    monkeypatch.setattr(logs, "open_source", lambda *a, **kw: remote)
+    monkeypatch.setattr(LogReader, "iter_messages", lambda *a, **kw: pytest.fail("full scan fallback"))
+    with pytest.raises(Exception, match="boundary|metadata region|unexpected record opcode"):
+        summarize("https://example.invalid/drive.mcap")
+    assert opener.calls
+    assert all(start < chunk_start + 64 or start >= summary_start - 64 for start, _ in opener.calls)
+    assert all(stop - start + 1 <= 1024 for start, stop in opener.calls)
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_unavailable_summary_uses_only_http_probe_and_footer(ros1_mcap, no_summary_mcap, missing):
+    from range_server import FakeOpener
+
+    from field_sessions_parser.reader import NoSummaryError
+    from field_sessions_parser.remote import HttpRangeFile
+
+    data = (no_summary_mcap if missing else ros1_mcap).read_bytes()
+    opener = FakeOpener(data)
+    with HttpRangeFile(
+        "https://example.invalid/drive.mcap", opener=opener, block_size=64, head_probe_bytes=64
+    ) as remote:
+        with pytest.raises(NoSummaryError, match="no summary section|over the"):
+            LogReader(remote, max_summary_bytes=64).open()
+    assert all(start == 0 or start >= len(data) - 128 for start, _ in opener.calls)
+    assert sum(stop - start + 1 for start, stop in opener.calls) <= 192
